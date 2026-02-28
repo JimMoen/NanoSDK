@@ -171,6 +171,7 @@ mqtt_pipe_timer_cb(void *arg)
 		// send it down...
 		p->busy = true;
 		nni_aio_set_iov(p->qsaio, 1, &iov);
+		fprintf(stderr, "[PROBE] qsaio PING send: txaio_busy=%d\n", nni_aio_busy(p->txaio));
 		nng_stream_send(p->conn, p->qsaio);
 		p->pingcnt ++;
 	}
@@ -583,6 +584,11 @@ mqtt_tcptran_pipe_send_cb(void *arg)
 	n = nni_aio_count(txaio);
 	nni_aio_iov_advance(txaio, n);
 	if (nni_aio_iov_count(txaio) > 0) {
+		fprintf(stderr,
+		    "[PROBE] txaio PARTIAL: sent %zu bytes, "
+		    "remaining iovs=%d, qsaio_busy=%d\n",
+		    (size_t) n, (int) nni_aio_iov_count(txaio),
+		    nni_aio_busy(p->qsaio));
 		nng_stream_send(p->conn, txaio);
 		nni_mtx_unlock(&p->mtx);
 		return;
@@ -793,6 +799,11 @@ mqtt_tcptran_pipe_recv_cb(void *arg)
 			nni_aio_set_msg(p->qsaio, qmsg);
 			// send ACK down...
 			nni_aio_set_iov(p->qsaio, 2, iov);
+			fprintf(stderr, "[PROBE] qsaio ACK send: cmd=0x%02x txaio_busy=%d\n",
+			        ack_cmd, nni_aio_busy(p->txaio));
+			if (nni_aio_busy(p->txaio)) {
+				fprintf(stderr, "[PROBE] *** CONCURRENT WRITE! txaio busy when qsaio sends ***\n");
+			}
 			nng_stream_send(p->conn, p->qsaio);
 		} else {
 			nni_msg_free(qmsg);
@@ -930,6 +941,10 @@ mqtt_tcptran_pipe_send_start(mqtt_tcptran_pipe *p)
 		niov++;
 	}
 	nni_aio_set_iov(txaio, niov, iov);
+	fprintf(stderr, "[PROBE] txaio send: qsaio_busy=%d\n", nni_aio_busy(p->qsaio));
+	if (nni_aio_busy(p->qsaio)) {
+		fprintf(stderr, "[PROBE] *** CONCURRENT WRITE! qsaio busy when txaio sends ***\n");
+	}
 	nng_stream_send(p->conn, txaio);
 }
 

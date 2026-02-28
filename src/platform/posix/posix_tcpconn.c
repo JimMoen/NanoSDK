@@ -17,6 +17,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -66,6 +67,36 @@ tcp_dowrite(nni_tcp_conn *c)
 		hdr.msg_iovlen = niov;
 		hdr.msg_iov    = iovec;
 
+		// ===== MOCK: Force partial write to reproduce concurrent write bug =====
+		// Only mock PUBLISH packets (type 3, first byte 0x30-0x3F).
+		// Trigger every N-th PUBLISH regardless of writeq state, to
+		// simulate sporadic TCP buffer-full partial writes.
+		// The partial write + subsequent qsaio submission creates the
+		// interleaving that causes frame_error on the broker.
+		static unsigned mock_pub_count = 0;
+		int mock_partial = 0;
+		if (niov > 1) {
+			uint8_t first_byte =
+			    *(uint8_t *) iovec[0].iov_base;
+			uint8_t pkt_type = (first_byte >> 4) & 0x0F;
+			if (pkt_type == 3) {
+				mock_pub_count++;
+				if ((mock_pub_count % 50) == 0) {
+					hdr.msg_iovlen = 1;
+					mock_partial   = 1;
+					fprintf(stderr,
+					    "[MOCK] Forcing partial write: "
+					    "pkt=PUBLISH(0x%02x) "
+					    "iov[0]=%zu bytes, "
+					    "total_iovs=%d, nth=%u\n",
+					    first_byte,
+					    iovec[0].iov_len, niov,
+					    mock_pub_count);
+				}
+			}
+		}
+		// ===== END MOCK =====
+
 		if ((n = sendmsg(fd, &hdr, MSG_NOSIGNAL)) < 0) {
 			switch (errno) {
 			case EINTR:
@@ -85,9 +116,17 @@ tcp_dowrite(nni_tcp_conn *c)
 			}
 		}
 
+		if (mock_partial) {
+			fprintf(stderr,
+			    "[MOCK] Partial sendmsg returned %d bytes "
+			    "(iov[0] only), next aio will interleave\n",
+			    n);
+		}
+
 		nni_aio_bump_count(aio, n);
 		// We completed the entire operation on this aio.
-		// (Sendmsg never returns a partial result.)
+		// (Sendmsg never returns a partial result — but with mock
+		// or real partial writes, the caller handles resubmission.)
 		nni_aio_list_remove(aio);
 		nni_aio_finish(aio, 0, nni_aio_count(aio));
 
